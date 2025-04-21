@@ -1,8 +1,6 @@
 import numpy as np 
-import matplotlib.pyplot as plt 
-import math 
 from tqdm import tqdm
-import jax 
+import jax
 import jax.numpy as jnp
 from jax import vmap
 from copy import copy
