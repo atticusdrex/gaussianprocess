@@ -8,7 +8,7 @@ authors = [
   { name = "Atticus Rex", email = "atticusd1@gmail.com" }
 ]
 dependencies = [
-    "numpy", "tqdm", "jax", "copy"
+    "numpy", "tqdm", "jax"
 ]                     # list of runtime dependencies
 
 [build-system]
