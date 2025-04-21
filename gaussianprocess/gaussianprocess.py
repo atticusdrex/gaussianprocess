@@ -4,50 +4,8 @@ import jax
 import jax.numpy as jnp
 from jax import vmap
 from copy import copy
-
-# Define the kernel function (e.g., RBF kernel)
-def rbf_kernel(x1, x2, kernel_params):
-    """
-    Radial Basis Function (RBF) kernel.
-
-    Parameters
-    ----------
-    x1, x2: array_like
-        two d-dimensional vectors. 
-
-    kernel_params: array_like
-        a d-dimensional vector specifying the diagonals of a 
-        covariance matrix which is inverted. 
-    
-    Returns: 
-    ---------
-    a scalar evaluating the RBF kernel at these two inputs 
-    """
-    h = (x1-x2).ravel()
-
-    return jnp.exp(-jnp.sum(h**2 / kernel_params))
-
-# Define the kernel function (e.g., RBF kernel)
-def laplace_kernel(x1, x2, kernel_params):
-    """
-    Radial Basis Function (RBF) kernel.
-
-    Parameters
-    ----------
-    x1, x2: array_like
-        two d-dimensional vectors. 
-
-    kernel_params: array_like
-        a d-dimensional vector specifying the diagonals of a 
-        covariance matrix which is inverted. 
-    
-    Returns: 
-    ---------
-    a scalar evaluating the RBF kernel at these two inputs 
-    """
-    h = (x1-x2).ravel()
-
-    return jnp.exp(-jnp.sum(np.abs(h) / kernel_params))
+from sklearn.preprocessing import StandardScaler
+from .kernellibrary import *
 
 # Gaussian Process Regression Class 
 def K(X1, X2, kernel_func, kernel_params):
@@ -152,7 +110,7 @@ class GaussianProcess:
     The main class for training, storing, and 
     optimizing Gaussian Processes. 
     """
-    def __init__(self, kernel_func = rbf_kernel, double_precision = False, rcond=1e-12):
+    def __init__(self, kernel_func = rbf_kernel, double_precision = False, rcond=1e-12, auto_scale = True):
         """
         The constructor of the Gaussian Process class
 
@@ -169,6 +127,10 @@ class GaussianProcess:
         rcond: float (default = 1e-10) many of the algorithms require linear solves and for 
             numerical stability it's often desirable to regularize results 
             by cutting off relative singular values below a certain tolerance. 
+
+        auto_scale: bool (default = True)
+            specifying whether the user would like to automatically 
+            standard-scale the input and output data (recommended for parameter optimization)
         """
         # Set the kernel function 
         self.kernel_func = kernel_func
@@ -178,10 +140,15 @@ class GaussianProcess:
 
         # Enable 64-bit floating point precision 
         if double_precision:
+            self.double_precision = True
             jax.config.update("jax_enable_x64", True)
+        else:
+            self.double_precision = False
+
+        self.auto_scale = auto_scale
 
 
-    def fit(self, X, Y, kernel_params, noise_var=0.0):
+    def fit(self, X, Y, kernel_params, optimize_params = False, noise_var=1e-8, lr=1e-2, max_iter = 10000, max_stagnation = 100, verbose=True):
         """
         This is the function which trains the Gaussian Process model on its 
         training data. It does not optimize its hyperparameters. 
@@ -189,7 +156,7 @@ class GaussianProcess:
         Parameters
         ----------
         X: array_like
-            The d x N array of input training data where each column represents 
+            The N x d array of input training data where each column represents 
             an observation of the input and d is the dimension of the 
             input. 
 
@@ -209,12 +176,29 @@ class GaussianProcess:
 
         # noise_var is the variance of random-noise in Y
         # Pass in X (d x N) 2d array and Y, (N) 1d vectors
-        self.X = jnp.array(X) 
-        self.Y = jnp.array(Y.ravel())
+        self.X = jnp.array(jnp.copy(X).T) 
+        self.Y = jnp.array(jnp.copy(Y).ravel())
         self.noise_var = noise_var
+
+        if self.auto_scale:
+            # Scaling X data 
+            self.Xscaler = StandardScaler()
+            self.X = self.Xscaler.fit_transform(self.X.T).T
+
+            # Scaling Y data (but storing for later use)
+            self.Ymean = jnp.mean(self.Y)
+            self.Ystd = jnp.std(self.Y)
+            self.Y = (self.Y - self.Ymean) / self.Ystd
+
+        # Calling the hyperparameter optimization function
+        if optimize_params:
+            self.optimize_kernel_params(kernel_params, lr = lr, max_iter = max_iter, max_stagnation = max_stagnation, verbose = verbose)
 
         # Compute the training matrix 
         self.Ktrain = K(self.X, self.X, self.kernel_func, self.kernel_params) + noise_var * jnp.eye(self.X.shape[1])
+
+        # Compute and store the cholesky decomposition of the training matrix
+        self.L = jnp.linalg.cholesky(self.Ktrain)
 
         cond_num = jnp.linalg.cond(self.Ktrain)
         # Check condition number of kernel matrix 
@@ -222,7 +206,8 @@ class GaussianProcess:
             print("Warning! Kernel Matrix is close to singular: K=%d" % (int(cond_num)))
 
         # Compute weights by solving linear system
-        self.alpha = jnp.linalg.lstsq(self.Ktrain, self.Y, rcond=self.rcond)[0]
+
+        self.alpha = jax.scipy.linalg.cho_solve((self.L, True), Y)
 
     
     def predict(self, Xtest, include_std=True):
@@ -233,7 +218,7 @@ class GaussianProcess:
         Parameters
         ----------
         Xtest: array_like
-            The d x M array of testing inputs for which we would like 
+            The M x d array of testing inputs for which we would like 
             to approximate the value of the Gaussian Process for M 
             inputs. 
 
@@ -248,21 +233,35 @@ class GaussianProcess:
         Ystd: A length-M array of the standard deviation associated 
             with each prediction. 
         """
+        # Scaling Xtest if necessary
+        if self.auto_scale:
+            Xtest = self.Xscaler.transform(Xtest)
 
         # Compute testing matrix 
-        Ktest = K(Xtest, self.X, self.kernel_func, self.kernel_params) 
+        Ktest = K(Xtest.T, self.X, self.kernel_func, self.kernel_params) 
 
         # Expected value of test inputs 
         Yhat = Ktest @ self.alpha
 
         # Standard deviation of prediction at test inputs
         if include_std:
-            Ystd = jnp.sqrt(jnp.diag(K(Xtest, Xtest, self.kernel_func, self.kernel_params) - Ktest @ jnp.linalg.lstsq(self.Ktrain, Ktest.T, rcond=self.rcond)[0]))
+            # Compute the standard deviation of predictions
+            Ystd = jnp.sqrt(jnp.diag(K(Xtest, Xtest, self.kernel_func, self.kernel_params) - Ktest @ jax.scipy.linalg.cho_solve((self.L, True), Ktest.T)))
+
+            # Auto-scaling the predicted values if necessary
+            if self.auto_scale:
+                Yhat, Ystd = Yhat*self.Ystd + self.Ymean, Ystd * self.Ystd
+            
             return Yhat, Ystd 
         else:
+            # Auto-scaling the predicted values if necessary
+            if self.auto_scale:
+                Yhat = Yhat*self.Ystd + self.Ymean
+
+            
             return Yhat
         
-    def optimize_kernel_params(self, kernel_param_guess, lr=1e-2, tol = 1e-6, max_iter = 10000, verbose=True):
+    def optimize_kernel_params(self, kernel_param_guess, lr=1e-2, max_iter = 10000, max_stagnation = 100, verbose=True):
         """
         This function is for optimizing the hyperparameters of the 
         Gaussian Process. This step is not required, but is necessary
@@ -282,6 +281,10 @@ class GaussianProcess:
         max_iter: int (default = 10000)
             The maximum number of iterations of the optimization
             before force interrupting. 
+
+        max_stagnation: int (default = 100)
+            The maximum number of iterations without an improvement in the loss
+            function before interrupting. 
 
         verbose: bool (default = True)
             Whether or not to print out the progress of the optimization. 
@@ -332,10 +335,9 @@ class GaussianProcess:
                 break
 
             # Break if the learning rate is zero to working precision
-            if lr < 3e-16:
+            if (lr < 3e-16 and self.double_precision) or (lr < 1e-7 and not self.double_precision):
                 print("Learning-Rate is at machine precision...")
                 break
-
             
             if verbose:
                 iterator.set_postfix_str("Current Loss: %.5f Learning Rate: %.2e"  % (this_loss, lr))
@@ -354,7 +356,7 @@ class GaussianProcess:
             trial_grads = grad_func(trial_p)
             trial_loss = loss(trial_p,self.kernel_func, self.X, self.Y, self.noise_var)
 
-            # Waiting until the trial step is valid i.e. no NaNs and we lower our loss-function
+            # Waiting until the trial step is valid i.e. no NaNs 
             while (jnp.isnan(trial_loss).any() or jnp.isnan(trial_grads['kernel_params']).any()):
                 # Making the learning rate smaller
                 lr *= 0.5
@@ -383,10 +385,6 @@ class GaussianProcess:
 
         # Save best kernel params 
         self.kernel_params = p['kernel_params']
-
-        # Retrain the model 
-        self.fit(self.X, self.Y, self.kernel_params, noise_var = self.noise_var)
-
 
 
 
