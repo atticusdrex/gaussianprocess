@@ -207,7 +207,7 @@ class GaussianProcess:
 
         # Compute weights by solving linear system
 
-        self.alpha = jax.scipy.linalg.cho_solve((self.L, True), Y)
+        self.alpha = jax.scipy.linalg.cho_solve((self.L, True), self.Y)
 
     
     def predict(self, Xtest, include_std=True):
@@ -246,7 +246,7 @@ class GaussianProcess:
         # Standard deviation of prediction at test inputs
         if include_std:
             # Compute the standard deviation of predictions
-            Ystd = jnp.sqrt(jnp.diag(K(Xtest, Xtest, self.kernel_func, self.kernel_params) - Ktest @ jax.scipy.linalg.cho_solve((self.L, True), Ktest.T)))
+            Ystd = jnp.sqrt(jnp.diag(K(Xtest.T, Xtest.T, self.kernel_func, self.kernel_params) - Ktest @ jax.scipy.linalg.cho_solve((self.L, True), Ktest.T)))
 
             # Auto-scaling the predicted values if necessary
             if self.auto_scale:
