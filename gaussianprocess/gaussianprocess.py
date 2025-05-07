@@ -1,4 +1,3 @@
-import numpy as np 
 from tqdm import tqdm
 import jax
 import jax.numpy as jnp
@@ -20,6 +19,12 @@ def K(X1, X2, kernel_func, kernel_params):
     X2: array_like
         a dxN2 array of inputs where each column is an
         observation of a specific input. 
+    kernel_func: function
+        a kernel function to apply element-wise to each
+        entry of the kernel matrix
+    kernel_params: array_like
+        jax.numpy array of kernel parameters to send into
+        the kernel function provided. 
 
     Returns: 
     -----------
@@ -32,7 +37,7 @@ def K(X1, X2, kernel_func, kernel_params):
     )(X1, X2)
 
 # Objective function for GPs (derived from MLE of Prior) 
-def loss(p, kernel_func, X, Y, noise_var):
+def log_likelihood(p, kernel_func, X, Y, noise_var):
     """
     A function computing the loss for a specific set of 
     training data and kernel function. 
@@ -101,7 +106,7 @@ def adam_step(params, grads, lr, t, m, v, beta1=0.9, beta2=0.999, epsilon=1e-8):
     v_hat = v / (1 - beta2 ** t)
 
     # Update parameters
-    updated_params = params - lr * m_hat / (np.sqrt(v_hat) + epsilon)
+    updated_params = params - lr * m_hat / (jnp.sqrt(v_hat) + epsilon)
 
     return updated_params, m, v
 
@@ -110,14 +115,14 @@ class GaussianProcess:
     The main class for training, storing, and 
     optimizing Gaussian Processes. 
     """
-    def __init__(self, kernel_func = rbf_kernel, double_precision = False, rcond=1e-12, auto_scale = True):
+    def __init__(self, kernel_func = rbf, double_precision = False, auto_scale = True):
         """
         The constructor of the Gaussian Process class
 
         Parameters
         ----------
 
-        kernel_func: array_like (default = rbf_kernel)
+        kernel_func: array_like (default = rbf)
             a kernel function if the user would like to pass it in. 
 
         double_precision: bool (default = False)
@@ -134,9 +139,6 @@ class GaussianProcess:
         """
         # Set the kernel function 
         self.kernel_func = kernel_func
-
-        # Set the matrix conditioning 
-        self.rcond = rcond
 
         # Enable 64-bit floating point precision 
         if double_precision:
@@ -167,9 +169,21 @@ class GaussianProcess:
         kernel_params: array_like
             the parameters to be passed into the kernel function.
 
-
-        noise_var: float (default = 0.0)
+        noise_var: float (default = 1e-8)
             the variance of any Gaussian White Noise in Y 
+
+        lr: float (default = 1e-2) 
+            learning rate of the iterative algorithm 
+
+        max_iter: int (default = 10000)
+            maximum number of iterations of ADAM gradient descent steps 
+            
+        max_stagnation: int (default = 100)
+            maximum number of steps without improvement in the 
+            log-likelihood function. 
+
+        verbose: bool (default = True)
+            whether or not to print the results
         """
         # Kernel_params is a 1d numpy array containing kernel parameters 
         self.kernel_params = jnp.array(kernel_params)
@@ -294,10 +308,10 @@ class GaussianProcess:
             'kernel_params':kernel_param_guess
         }
 
-        grad_func = jax.grad(lambda p: loss(p, self.kernel_func, self.X, self.Y, self.noise_var))
+        grad_func = jax.grad(lambda p: log_likelihood(p, self.kernel_func, self.X, self.Y, self.noise_var))
         
         # Compute the gradient function of our loss-function
-        initial_loss = loss(p, self.kernel_func, self.X, self.Y, self.noise_var)
+        initial_loss = log_likelihood(p, self.kernel_func, self.X, self.Y, self.noise_var)
 
         # Print the loss at the parameter guess 
         if verbose:
@@ -313,13 +327,13 @@ class GaussianProcess:
         best_loss = 1e99
 
         # Initializing moment vectors 
-        m = np.zeros_like(p['kernel_params'])
-        v = np.zeros_like(p['kernel_params'])
+        m = jnp.zeros_like(p['kernel_params'])
+        v = jnp.zeros_like(p['kernel_params'])
 
         # Looping through the iterator 
         for t in iterator:
             # Printing the loss at the step
-            this_loss = loss(p,self.kernel_func, self.X, self.Y, self.noise_var)
+            this_loss = log_likelihood(p,self.kernel_func, self.X, self.Y, self.noise_var)
 
             # Checking stagnation 
             if this_loss < best_loss:
@@ -354,11 +368,11 @@ class GaussianProcess:
 
             # Taking the gradient at the trial step
             trial_grads = grad_func(trial_p)
-            trial_loss = loss(trial_p,self.kernel_func, self.X, self.Y, self.noise_var)
+            trial_loss = log_likelihood(trial_p,self.kernel_func, self.X, self.Y, self.noise_var)
 
             # Waiting until the trial step is valid i.e. no NaNs 
             while (jnp.isnan(trial_loss).any() or jnp.isnan(trial_grads['kernel_params']).any()):
-                # Making the learning rate smaller
+                # Dividing the learning rate in half
                 lr *= 0.5
 
                 # Making a trial step 
@@ -369,7 +383,7 @@ class GaussianProcess:
 
                 # Taking the gradient at the trial step
                 trial_grads = grad_func(trial_p)
-                trial_loss = loss(trial_p,self.kernel_func, self.X, self.Y, self.noise_var)
+                trial_loss = log_likelihood(trial_p,self.kernel_func, self.X, self.Y, self.noise_var)
 
             # Saving the next parameter step as the trial p 
             p, m, v = copy(trial_p), trial_m, trial_v
@@ -381,7 +395,7 @@ class GaussianProcess:
         
         # Print final loss
         if verbose:
-            print(f"Final Loss: {loss(p, self.kernel_func, self.X, self.Y, self.noise_var):.5f}\n")
+            print(f"Final Loss: {log_likelihood(p, self.kernel_func, self.X, self.Y, self.noise_var):.5f}\n")
 
         # Save best kernel params 
         self.kernel_params = p['kernel_params']
