@@ -224,7 +224,7 @@ class GaussianProcess:
         self.alpha = jax.scipy.linalg.cho_solve((self.L, True), self.Y)
 
     
-    def predict(self, Xtest, include_std=True):
+    def predict(self, Xtest, include_std=True, include_cov = False):
         """
         This function is for the online prediction of the training 
         data. 
@@ -267,6 +267,14 @@ class GaussianProcess:
                 Yhat, Ystd = Yhat*self.Ystd + self.Ymean, Ystd * self.Ystd
             
             return Yhat, Ystd 
+        elif include_cov:
+            Yvar = K(Xtest.T, Xtest.T, self.kernel_func, self.kernel_params) - Ktest @ jax.scipy.linalg.cho_solve((self.L, True), Ktest.T)
+
+            # Auto-scaling the predicted values if necessary
+            if self.auto_scale:
+                Yhat, Yvar = Yhat*self.Ystd + self.Ymean, Yvar* self.Ystd**2
+            
+            return Yhat, Yvar 
         else:
             # Auto-scaling the predicted values if necessary
             if self.auto_scale:
